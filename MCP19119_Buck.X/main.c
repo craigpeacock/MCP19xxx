@@ -211,7 +211,7 @@ void main(void)
 
     while(1) {
         
-       OVCCON = (uint8_t)Read_ADC(CH_AN0) / 4;
+       OVCCON = Read_ADC(CH_AN0) / 4;
        
     };
 }
