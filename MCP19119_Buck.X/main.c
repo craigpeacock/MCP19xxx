@@ -12,6 +12,13 @@
 
 #include <xc.h>
 
+#define I2C_ADDR 0x01
+
+#define CH_AN0  0b10000
+#define CH_AN1  0b10001
+#define CH_AN2  0b10010
+#define CH_AN3  0b10011
+
 void Init_TMR2(void)
 {
     // Device is clocked by factory calibrated precision 8 MHz internal 
@@ -28,6 +35,33 @@ void Init_TMR2(void)
 void Init_GPIO(void)
 {
     
+}
+
+void Init_I2C(void)
+{
+    SSPADD = I2C_ADDR;          // Set slave address
+    SSPCON1bits.SSPM = 0b0110;  // I2C slave mode, 7-bit address
+    SSPCON3bits.SBCDE = 1;      // Enable slave bus collision interrupts
+    SSPCON3bits.DHEN = 1;       // Data hold enable
+    PIR1bits.SSPIF = 0;         // Clear interrupt flag
+    SSPCON1bits.SSPEN = 1;      // Enable 
+}
+
+void Init_ADC(void)
+{
+    // 10-bit ADC. Full Scale is 5V. 
+    ANSELAbits.ANSA0 = 1;       // AN0 Analog
+    ANSELAbits.ANSA1 = 1;       // AN1 Analog
+    ADCON1bits.ADCS = 0b101;    // ADC Conversion Clock = FOSC/16 (TAD 2.0uS)
+    ADCON0bits.ADON = 1;        // Enable ADC
+}
+
+uint16_t Read_ADC(uint8_t channel)
+{
+    ADCON0bits.CHS = (channel & 0b11111);   // Select Channel
+    ADCON0bits.GO_nDONE = 1;                // Start Conversion
+    while (ADCON0bits.GO_nDONE);            // Wait for conversion to complete
+    return(ADRESL + (ADRESH << 8));
 }
 
 void Load_Calibration(void)
@@ -166,13 +200,18 @@ void Enable_Output(void)
 
 void main(void)
 {
+    
     Init_TMR2();
     Init_GPIO();
+    Init_ADC();
+    Init_I2C();
     Load_Calibration();
     Load_Config();
     Enable_Output();
 
     while(1) {
-    
+        
+       OVCCON = (uint8_t)Read_ADC(CH_AN0) / 4;
+       
     };
 }
