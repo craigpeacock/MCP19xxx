@@ -12,12 +12,18 @@
 
 #include <xc.h>
 
-#define I2C_ADDR 0x01
+#define I2C_ADDR 0x10
 
 #define CH_AN0  0b10000
 #define CH_AN1  0b10001
 #define CH_AN2  0b10010
 #define CH_AN3  0b10011
+
+uint8_t i2c_out_buf[4];
+uint8_t i2c_in_buf[4];
+uint8_t i2c_in_pnt;
+uint8_t i2c_out_pnt;
+uint8_t i2c_out_len;
 
 void Init_TMR2(void)
 {
@@ -41,8 +47,9 @@ void Init_I2C(void)
 {
     SSPADD = I2C_ADDR;          // Set slave address
     SSPCON1bits.SSPM = 0b0110;  // I2C slave mode, 7-bit address
+    SSPCON2bits.SEN = 1;        // Enable clock stretching
     SSPCON3bits.SBCDE = 1;      // Enable slave bus collision interrupts
-    SSPCON3bits.DHEN = 1;       // Data hold enable
+    //SSPCON3bits.DHEN = 1;       // Data hold enable
     PIR1bits.SSPIF = 0;         // Clear interrupt flag
     SSPCON1bits.SSPEN = 1;      // Enable 
 }
@@ -52,7 +59,8 @@ void Init_ADC(void)
     // 10-bit ADC. Full Scale is 5V. 
     ANSELAbits.ANSA0 = 1;       // AN0 Analog
     ANSELAbits.ANSA1 = 1;       // AN1 Analog
-    ADCON1bits.ADCS = 0b101;    // ADC Conversion Clock = FOSC/16 (TAD 2.0uS)
+    //ADCON1bits.ADCS = 0b101;    // ADC Conversion Clock = FOSC/16 (TAD 2.0uS)
+    ADCON1bits.ADCS = 0b010;    // ADC Conversion Clock = FOSC/32 (TAD 4.0uS)
     ADCON0bits.ADON = 1;        // Enable ADC
 }
 
@@ -186,7 +194,7 @@ void Load_Config(void)
     ABECONbits.MEASEN = 0;  // Relative efficiency measurement control bit
     ABECONbits.SLCPBY = 0;  // Slope compensation enabled (not bypassed)    
     ABECONbits.CRTMEN = 1;  // Current measurement circuitry enabled
-    ABECONbits.TMPSEN = 0;  // Internal temperature sensor 
+    ABECONbits.TMPSEN = 1;  // Internal temperature sensor 
     ABECONbits.RECIREN = 0; // Relative efficiency circuitry 
     ABECONbits.PATHEN = 1;  // Signal chain circuitry enabled
 }
@@ -198,20 +206,111 @@ void Enable_Output(void)
     PE1bits.PUEN = 0;           // Disable +VSEN Weak Pull-Up Enable bit
 }
 
+void Disable_Output(void)
+{
+    ATSTCONbits.DRVDIS = 1;     // Disable High-side and Low-side MOSFET drivers
+    T2CONbits.TMR2ON = 0;       // Disable Timer (PWM)
+    PE1bits.PUEN = 1;           // Enable +VSEN Weak Pull-Up Enable bit
+}
+
+void Process_I2C_Command(uint8_t *i2c_in_buf, uint8_t in_len, uint8_t *i2c_out_buf, uint8_t *out_len )
+{   
+    // i2cbuf[0] = i2c address 
+    // i2cbuf[1] = command
+    // i2cbuf[2] = payload
+    // i2cbuf[3] = payload
+    
+    switch(i2c_in_buf[1]) {
+        case 0x01:
+            // Set Output Voltage:
+            OVCCON = i2c_in_buf[2];     // Fine Control
+            OVFCON = i2c_in_buf[3];     // Course Control
+            break;
+            
+        case 0x02:
+            // Turn on Output
+            Enable_Output();
+            break;
+            
+        case 0x03:
+            // Turn off Output
+            Disable_Output();
+            break;
+            
+        case 0x04:
+            // Read ADC
+            ADCON0bits.CHS = (i2c_in_buf[2] & 0b11111); // Select Channel
+            ADCON0bits.GO_nDONE = 1;                    // Start Conversion
+            while (ADCON0bits.GO_nDONE);                // Wait for conversion to complete
+            i2c_out_buf[0] = ADRESH;
+            i2c_out_buf[1] = ADRESL;
+            *out_len = 2;
+            break;
+            
+        default:
+            break;
+    }
+}
+
 void main(void)
 {
-    
     Init_TMR2();
     Init_GPIO();
     Init_ADC();
     Init_I2C();
     Load_Calibration();
     Load_Config();
-    Enable_Output();
+    //Enable_Output();
 
     while(1) {
         
-       OVCCON = Read_ADC(CH_AN0) / 4;
+       //OVCCON = Read_ADC(CH_AN0) / 4;
        
+       if (SSPIF) {
+           SSPIF = 0;
+           uint8_t sspstat = SSPSTAT;
+           switch (sspstat & 0x25) {
+               case 0x01:
+                   // Buffer full, master write, last byte address
+                   i2c_in_pnt = 0;
+                   i2c_in_buf[i2c_in_pnt++] = SSPBUF;
+                   SSPCON1bits.CKP = 1; // Release clock
+                   break;
+                   
+               case 0x21:
+                   // Buffer full, master write, last byte data
+                   i2c_in_buf[i2c_in_pnt++] = SSPBUF;
+                   if (SSPCON2bits.ACKSTAT) {
+                       // Master wants to send more data
+                       SSPCON1bits.CKP = 1; // Release clock
+                   } else {
+                       // Last byte sent, Process buffer
+                       SSPCON1bits.CKP = 1; // Release clock
+                       Process_I2C_Command(&i2c_in_buf, i2c_in_pnt, &i2c_out_buf, &i2c_out_len);
+                   }
+                   break;
+                   
+               case 0x05:
+                   // Buffer full, master read, last byte address
+                   i2c_in_pnt = 0;
+                   i2c_in_buf[i2c_in_pnt++] = SSPBUF;
+                   i2c_out_pnt = 0;
+                   SSPBUF = i2c_out_buf[i2c_out_pnt++];  // 1st Byte to send
+                   SSPCON1bits.CKP = 1; // Release clock
+                   break;
+                   
+               case 0x24:
+                   // Buffer full, master read, last byte data
+                   i2c_in_buf[i2c_in_pnt++] = SSPBUF;
+                   SSPBUF = i2c_out_buf[i2c_out_pnt++]; // Subsequent byte(s) to send
+                   SSPCON1bits.CKP = 1; // Release clock
+                   break;
+               
+               default:
+                   break;
+           }
+           
+       }
+
     };
 }
